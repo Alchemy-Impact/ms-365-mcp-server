@@ -4,6 +4,7 @@ import GraphClient from './graph-client.js';
 import AuthManager from './auth.js';
 import { api } from './generated/client.js';
 import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 import { readFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -186,10 +187,23 @@ async function executeGraphTool(
             break;
 
           case 'Body':
+            // Parse JSON string if the parameter is a string
+            let parsedValue = paramValue;
+            if (typeof paramValue === 'string') {
+              try {
+                parsedValue = JSON.parse(paramValue);
+                logger.info(`Parsed JSON string for body parameter '${paramName}'`);
+              } catch (error) {
+                logger.warn(
+                  `Failed to parse body parameter '${paramName}' as JSON, using as-is: ${(error as Error).message}`
+                );
+              }
+            }
+
             if (paramDef.schema) {
-              const parseResult = paramDef.schema.safeParse(paramValue);
+              const parseResult = paramDef.schema.safeParse(parsedValue);
               if (!parseResult.success) {
-                const wrapped = { [paramName]: paramValue };
+                const wrapped = { [paramName]: parsedValue };
                 const wrappedResult = paramDef.schema.safeParse(wrapped);
                 if (wrappedResult.success) {
                   logger.info(
@@ -197,13 +211,13 @@ async function executeGraphTool(
                   );
                   body = wrapped;
                 } else {
-                  body = paramValue;
+                  body = parsedValue;
                 }
               } else {
-                body = paramValue;
+                body = parsedValue;
               }
             } else {
-              body = paramValue;
+              body = parsedValue;
             }
             break;
 
@@ -471,7 +485,26 @@ export function registerGraphTools(
     const paramSchema: Record<string, z.ZodTypeAny> = {};
     if (tool.parameters && tool.parameters.length > 0) {
       for (const param of tool.parameters) {
-        paramSchema[param.name] = param.schema || z.any();
+        // For Body parameters, replace complex schemas with string + JSON structure in description
+        if (param.type === 'Body' && param.schema) {
+          try {
+            const jsonSchema = zodToJsonSchema(param.schema, { name: param.name });
+            const schemaDescription = JSON.stringify(jsonSchema, null, 2);
+            paramSchema[param.name] = z
+              .string()
+              .describe(
+                `${param.description || 'Request body'}. Provide as a JSON string with the following structure:\n\n${schemaDescription}`
+              );
+          } catch (error) {
+            // Fallback to original schema if conversion fails
+            logger.warn(
+              `Failed to convert body parameter '${param.name}' to JSON schema: ${(error as Error).message}`
+            );
+            paramSchema[param.name] = param.schema || z.any();
+          }
+        } else {
+          paramSchema[param.name] = param.schema || z.any();
+        }
       }
     }
 
